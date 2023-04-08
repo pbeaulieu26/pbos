@@ -87,6 +87,7 @@ main:
 
   jmp 0x7E00
 
+  cli
   hlt
 
 halt:
