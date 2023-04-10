@@ -6,7 +6,7 @@ bits 16
 ;
 
 ; Boot parameter block
-jmp short main                                                 ; 3 bytes: jump + nop
+jmp short start                                                 ; 3 bytes: jump + nop
 nop
 
 bdb_oem                               db 'MSWIN4.1'            ; 8 bytes
@@ -34,7 +34,7 @@ ebr_system_id	                        db 'FAT12   '            ; System identifi
 
 
 ;---------------- Code Segment ----------------
-main:
+start:
   ; setup data segment
   mov ax, 0
   mov ds, ax
@@ -43,8 +43,14 @@ main:
   ; setup stack
   mov ss, ax
   mov sp, 0x7C00 ; stack grows downwards 
-  mov bp, 0x7C00 ; stack grows downwards 
+  mov bp, 0x7C00 ; stack grows downwards
 
+  ; Make sure we are at 0000:7C00
+  push es          ; code segment = 0000
+  push word .main  ; instr pointer
+  retf             ; pops the instruction pointer and the code segment
+
+.main:
   ; set video mode
   mov ah, 0x0
   mov al, 2
@@ -56,126 +62,67 @@ main:
   mov cl, 0xF ;
   int 0x10
 
-  ; write string
-  mov cx, msglen
-  mov bx, msg
-  call printLine
-  call printLine
-  call printLine
-  call printLine
-  call printLine
-
-  call newLine
-  call newLine
-  call newLine
-
-  mov al, 'A'
-  call printChar
-  mov al, 'A'
-  call printChar
-  call newLine
-
-  mov ax, 1 ; read block 1
   mov [ebr_drive_number], dl
-  mov cl, 1 ; 1 block to read
-  mov bx, 0x7E00
+
+  ;
+  ; Read FAT
+  ;
+
+  mov word [fatBuffer], 0x7E00
+  mov word ax, [bdb_num_reserved_sectors] ; FAT starts after reserved sectors
+  mov word [fatStartSector], ax 
+
+  mov word ax, [fatStartSector] 
+  mov word cx, [bdb_sectors_per_fat]
+  mov byte dl, [ebr_drive_number]
+  mov word bx, [fatBuffer]
   call readDisk
 
-  mov al, 'A'
-  call printChar
-  call newLine
+  ;
+  ; Read Root Directory
+  ;
 
-  jmp 0x7E00
+  ; Preperation
+  ; Root Directory Start Sector
+  mov byte al, [bdb_num_fat]
+  mov word cx, [bdb_sectors_per_fat]
+  mul cx                         ; ax = bdb_num_fat * bdb_sectors_per_fat
+  push ax
+  add word ax, [fatStartSector]
+  mov word [rootDirStartSector], ax
+  pop ax
+
+  ; Root Directory Buffer
+  mov word cx, [bdb_bytes_per_sector]
+  mul cx                         ; ax = bdb_num_fat * bdb_sectors_per_fat * bdb_bytes_per_sector
+  add ax, [fatBuffer]
+  mov word [rootDirBuffer], ax
+
+  ; Number of sectors to read to cover all entries
+  ;int rootDirSectors = ((fs.boot.bdb_num_root_dir_entries * sizeof(RootDirectoryEntry)) + (fs.boot.bdb_bytes_per_sector - 1))
+  ;                       / fs.boot.bdb_bytes_per_sector;
+  mov word ax, [bdb_num_root_dir_entries]
+  mov cx, 32                     ; 32 bytes entries
+  mul cx                         ; ax = bdb_num_root_dir_entries * 32
+  mov word bx, [bdb_bytes_per_sector]
+  dec bx                         ; bx = fs.boot.bdb_bytes_per_sector - 1
+  add ax, bx                     ; ((fs.boot.bdb_num_root_dir_entries * sizeof(RootDirectoryEntry)) + (fs.boot.bdb_bytes_per_sector - 1))
+  mov word bx, [bdb_bytes_per_sector] ; prep for dx:ax / bx
+  div bx                         ; ax = div, dx = remainder
+                                 ; ax = rootDirSectors
+
+  ; Read
+  mov cx, ax                     ; rootDirSectors = cx
+  mov word ax, [rootDirStartSector]
+  mov byte dl, [ebr_drive_number]
+  mov word bx, [rootDirBuffer]
+  call readDisk
 
   cli
   hlt
 
 halt:
   jmp halt
-
-; 
-; Display Utilities
-;
-
-; Clears the display
-; Parameters:
-; - None
-; Return:
-; - None
-clear:
-  pusha
-  ; set video mode
-  mov ah, 0x0
-  mov al, 2
-  int 0x10 ; video service
-
-  ; reset cursor
-  mov dh, 0
-  mov dl, 0
-  call moveCursor
-
-  popa
-  ret
-
-; Moves cursor to input param position
-; Parameters:
-; - dh: row
-; - dl: col
-; Return:
-; - None
-moveCursor:
-  pusha
-  mov ah, 0x2 ; instr
-  mov bh, 0x0
-  int 0x10
-
-  popa
-  ret
-
-
-; Prints a string to the display
-; Parameters:
-; - al: character to print
-; Return:
-; - None
-newLine:
-  pusha
-  ; get cursor, ret dh: row, dl: col 
-  mov ah, 0x3 ; instr
-  mov bh, 0x0
-  int 0x10
-  
-  add dh, 1   ; row, move 1 down
-  mov dl, 0   ; go back left
-  call moveCursor
-
-  popa
-  ret
-
-
-; Prints a character to the display
-; Parameters:
-; - al: character to print
-; Return:
-; - None
-printChar:
-  pusha
-  mov ah, 0xA
-  mov bh, 0
-  mov cx, 1
-  int 0x10
-
-  ; get cursor, ret dh: row, dl: col 
-  mov ah, 0x3 ; instr
-  mov bh, 0x0
-  int 0x10
-  
-  add dl, 1   ; col, move 1 left
-  call moveCursor
-
-  popa
-  ret
-
 
 ; Prints a string to the display
 ; Parameters:
@@ -236,35 +183,6 @@ getKeyPress:
   mov ah, bh ; restore ah
   pop bx 
   ret
-
-
-; 
-; Error handlers
-;
-
-; Writes an error message then waits for input and reboots the machine
-; Parameters:
-; - None
-; Return:
-; -None
-readError:
-  mov bx, read_error
-  mov cx, read_error_len
-  call printLine
-  jmp .reboot
-
-; Reboots the machine at start of BIOS
-.reboot:
-  ; get input char
-  call getKeyPress
-
-  ; jump to bios start
-  jmp 0xFFFF:0
-
-.halt:
-  cli ; disable interruupts
-  hlt
-
 
 ; 
 ; Disk Utilities
@@ -393,18 +311,52 @@ resetDisk:
   ret
 
 
+; 
+; Error handlers
+;
+
+; Writes an error message then waits for input and reboots the machine
+; Parameters:
+; - None
+; Return:
+; -None
+readError:
+  mov bx, read_error
+  mov cx, read_error_len
+  call printLine
+  jmp .reboot
+
+; Reboots the machine at start of BIOS
+.reboot:
+  ; get input char
+  call getKeyPress
+
+  ; jump to bios start
+  jmp 0xFFFF:0
+
+.halt:
+  cli ; disable interruupts
+  hlt
+
+
+
 ;---------------- DATA Segment ----------------
 
 ; Constants
 COLOR_GRAY equ 0x7
 
 ; Strings
-msg db 'HELLO WORLD', 0x0a
-msglen equ $-msg
-
 read_error db 'Could not read disk after 3 attempts', 0x0a
 read_error_len equ $-read_error
 
+; Variables
+fatStartSector dw 0x0
+rootDirStartSector dw 0x0
+dataStartSector dw 0x0
+
+fatBuffer dw 0x0
+rootDirBuffer dw 0x0
+dataBuffer dw 0x0
 
 ;---------------- End of BootSector ----------------
 times 510 - ($-$$) db 0
