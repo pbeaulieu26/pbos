@@ -68,14 +68,14 @@ start:
   ; Read FAT
   ;
 
-  mov word [fatBuffer], 0x7E00
+  mov word [fat_buffer], 0x7E00
   mov word ax, [bdb_num_reserved_sectors] ; FAT starts after reserved sectors
-  mov word [fatStartSector], ax 
+  mov word [fat_start_sector], ax 
 
-  mov word ax, [fatStartSector] 
+  mov word ax, [fat_start_sector] 
   mov word cx, [bdb_sectors_per_fat]
   mov byte dl, [ebr_drive_number]
-  mov word bx, [fatBuffer]
+  mov word bx, [fat_buffer]
   call readDisk
 
   ;
@@ -88,21 +88,21 @@ start:
   mov word cx, [bdb_sectors_per_fat]
   mul cx                         ; ax = bdb_num_fat * bdb_sectors_per_fat
   push ax
-  add word ax, [fatStartSector]
-  mov word [rootDirStartSector], ax
+  add word ax, [fat_start_sector]
+  mov word [root_dir_start_sector], ax
   pop ax
 
-  ; Root Directory Buffer
+  ; Set Root Directory buffer
   mov word cx, [bdb_bytes_per_sector]
   mul cx                         ; ax = bdb_num_fat * bdb_sectors_per_fat * bdb_bytes_per_sector
-  add ax, [fatBuffer]
-  mov word [rootDirBuffer], ax
+  add ax, [fat_buffer]
+  mov word [root_dir_buffer], ax
 
-  ; Number of sectors to read to cover all entries
+  ; Compute number of sectors to read to cover all entries
   ;int rootDirSectors = ((fs.boot.bdb_num_root_dir_entries * sizeof(RootDirectoryEntry)) + (fs.boot.bdb_bytes_per_sector - 1))
   ;                       / fs.boot.bdb_bytes_per_sector;
   mov word ax, [bdb_num_root_dir_entries]
-  mov cx, 32                     ; 32 bytes entries
+  mov cx, ROOT_DIR_ENTRY_SIZE    ; 32 bytes entries
   mul cx                         ; ax = bdb_num_root_dir_entries * 32
   mov word bx, [bdb_bytes_per_sector]
   dec bx                         ; bx = fs.boot.bdb_bytes_per_sector - 1
@@ -113,16 +113,56 @@ start:
 
   ; Read
   mov cx, ax                     ; rootDirSectors = cx
-  mov word ax, [rootDirStartSector]
+  mov word ax, [root_dir_start_sector]
   mov byte dl, [ebr_drive_number]
-  mov word bx, [rootDirBuffer]
+  mov word bx, [root_dir_buffer]
   call readDisk
+
+  ;
+  ; Read kernel file
+  ;
+
+  mov ax, 0    ; counter for number of entries in root dir 
+  mov bx, [root_dir_buffer]
+  mov cx, 11 ; file names in root dir are 11 bytes
+  mov si, kernel_file_name    ; Set si to kernel file
+
+  ; Compare each filenames in root directory entry to the kernel file
+.nextEntry
+  mov di, bx                  ; Set di to root directory entry's filename
+
+  push cx
+  push si
+  repe cmpsb                  ; Compares ds:si to es:di
+  pop si
+  pop cx
+  je .found
+
+  cmp ax, [bdb_num_root_dir_entries] ; max number of root dir entries reached
+  je .fail
+
+  inc ax
+  add bx, ROOT_DIR_ENTRY_SIZE ; jump to next entry's filename
+  jmp .nextEntry
+
+.found
+  ; jump to kernel
+  ; TODO
+  jmp .end
+
+.fail
+  mov bx, kernel_error
+  mov cx, kernel_error_len
+  call printLine
+
+.end
 
   cli
   hlt
 
 halt:
   jmp halt
+
 
 ; Prints a string to the display
 ; Parameters:
@@ -344,19 +384,26 @@ readError:
 
 ; Constants
 COLOR_GRAY equ 0x7
+ROOT_DIR_ENTRY_SIZE equ 32
+ROOT_DIR_ENTRY_FILENAME_LENGTH equ 11
 
 ; Strings
 read_error db 'Could not read disk after 3 attempts', 0x0a
 read_error_len equ $-read_error
 
-; Variables
-fatStartSector dw 0x0
-rootDirStartSector dw 0x0
-dataStartSector dw 0x0
+kernel_error db 'Could not find kernel', 0x0a
+kernel_error_len equ $-kernel_error
 
-fatBuffer dw 0x0
-rootDirBuffer dw 0x0
-dataBuffer dw 0x0
+kernel_file_name db 'KERNEL  BIN'
+
+; Variables
+fat_start_sector dw 0x0
+root_dir_start_sector dw 0x0
+data_start_sector dw 0x0
+
+fat_buffer dw 0x0
+root_dir_buffer dw 0x0
+data_buffer dw 0x0
 
 ;---------------- End of BootSector ----------------
 times 510 - ($-$$) db 0
